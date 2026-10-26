@@ -1,0 +1,13 @@
+{
+  "name": "com.hidano.missing-reference-finder",
+  "version": "1.0.0",
+  "displayName": "Missing Reference Finder",
+  "description": "A tool to find missing references in Unity projects.",
+  "unity": "6000.0",
+  "author": {
+    "name": "Hidano"
+  },
+  "dependencies": {
+  },
+  "license": "MIT"
+}
