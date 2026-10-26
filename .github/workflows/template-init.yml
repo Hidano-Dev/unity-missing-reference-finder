@@ -1,0 +1,70 @@
+# =============================================================================
+# テンプレート初期化ワークフロー
+# -----------------------------------------------------------------------------
+# テンプレートから新規リポジトリを生成した際の最初の push で 1 回だけ実行され、
+#   1. 同梱の設定済みプロジェクト (TemplateProject) をリポジトリ名にリネームし、
+#      ProjectSettings の productName もリポジトリ名へ書き換え
+#   2. 初期化系ワークフローの削除・README の差し替え
+# を行い、結果を "chore: initialize from template" としてコミットする。
+#
+# Unity バージョン・パッケージ構成は同梱 TemplateProject のものをそのまま使う
+# (初期化時には変換しない)。標準バージョンを変えるときは TemplateProject を
+# 対象バージョンの Unity で開き直してコミットする。
+#
+# デバッグ: workflow_dispatch で手動実行した場合は自己削除をスキップする。
+# =============================================================================
+name: Template Init
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # デバッグ用 (自己削除しない)
+
+env:
+  # 同梱プロジェクトのディレクトリ名 (テンプレート側で固定)
+  TEMPLATE_DIR: TemplateProject
+  # 初期プロジェクトのディレクトリ名 (既定はリポジトリ名)
+  PROJECT_DIR: ${{ github.event.repository.name }}
+
+jobs:
+  init:
+    # テンプレートリポジトリ自身では push で発火させない (手動実行のみ許可)
+    if: github.event.repository.is_template == false || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── ① 同梱プロジェクトをリポジトリ名にリネーム ─────────
+      #    ディレクトリ名 (git mv) + ProjectSettings の productName
+      #    再実行 (デバッグ) 時はリネーム済みでも冪等に動く
+      - name: Rename template project
+        run: |
+          if [ -d "$TEMPLATE_DIR" ]; then
+            bash .github/scripts/rename-project.sh "$TEMPLATE_DIR" "$PROJECT_DIR"
+          elif [ -d "$PROJECT_DIR" ]; then
+            bash .github/scripts/rename-project.sh "$PROJECT_DIR" "$PROJECT_DIR"
+          else
+            echo "::error::'$TEMPLATE_DIR' も '$PROJECT_DIR' も見つかりません。テンプレートの同梱プロジェクトを確認してください"
+            exit 1
+          fi
+          VER=$(awk '/^m_EditorVersion:/{print $2; exit}' "$PROJECT_DIR/ProjectSettings/ProjectVersion.txt")
+          echo "Unity $VER (同梱バージョン) : $PROJECT_DIR" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── ② コミット & 初期化系ワークフローの自己削除 ────────
+      #    ※ update-project.yml / add-another-project.yml / scripts は残す
+      - name: Commit and cleanup
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            rm -f .github/workflows/template-init.yml
+            rm -f .github/workflows/unity-versions-update.yml
+            # テンプレート専用 README を生成先用に差し替え
+            mv -f .github/PROJECT_README.md README.md
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: initialize from template"
+          git push
