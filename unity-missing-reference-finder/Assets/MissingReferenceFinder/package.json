@@ -1,8 +1,8 @@
 {
   "name": "com.hidano.missing-reference-finder",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "displayName": "Missing Reference Finder",
-  "description": "A tool to find missing references in Unity projects.",
+  "description": "A tool to find missing references in Unity projects. Also fills empty PlayableDirector binding entries when a Timeline is saved, so they are committed together with the Timeline change.",
   "unity": "6000.0",
   "author": {
     "name": "Hidano"
