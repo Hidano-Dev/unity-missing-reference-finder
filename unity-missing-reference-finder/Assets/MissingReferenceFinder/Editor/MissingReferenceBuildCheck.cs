@@ -24,7 +24,7 @@ namespace Hidano.MissingReferenceFinder.Editor
     /// ログには「どのファイルの / どの GameObject (階層パス) の / 上から何番目のどのコンポーネントの / どのフィールド」が
     /// 壊れているかと、その対処法を出力する。Prefab インスタンス内のオブジェクトは元 Prefab を読み込んで名前を解決する。
     ///
-    /// 有効/無効はメニュー (Hidano/Tools/Check Missing References On Build) または
+    /// 有効/無効はメニュー (Tools/Hidano/Check Missing References On Build) または
     /// <see cref="MissingReferenceFinderWindow"/> から切り替えられる。
     /// </summary>
     public sealed class MissingReferenceBuildCheck : IPreprocessBuildWithReport
@@ -304,6 +304,7 @@ namespace Hidano.MissingReferenceFinder.Editor
         private static int CheckBuildScenes(out string breakdown)
         {
             var total = 0;
+            var unusedOverrideTotal = 0;
             var scenePaths = new List<string>();
             var prefabPaths = new List<string>();
             var prefabUsedBy = new Dictionary<string, List<string>>();
@@ -351,7 +352,7 @@ namespace Hidano.MissingReferenceFinder.Editor
                 foreach (var scenePath in scenePaths)
                 {
                     EditorUtility.DisplayProgressBar("Missing Reference Build Check", scenePath, (float)index++ / totalFiles);
-                    var count = CheckYamlFile(scenePath, true, null);
+                    var count = CheckYamlFile(scenePath, true, null, ref unusedOverrideTotal);
                     if (count > 0)
                     {
                         fileCounts.Add((scenePath, count));
@@ -363,7 +364,7 @@ namespace Hidano.MissingReferenceFinder.Editor
                 foreach (var prefabPath in prefabPaths)
                 {
                     EditorUtility.DisplayProgressBar("Missing Reference Build Check", prefabPath, (float)index++ / totalFiles);
-                    var count = CheckYamlFile(prefabPath, false, prefabUsedBy[prefabPath]);
+                    var count = CheckYamlFile(prefabPath, false, prefabUsedBy[prefabPath], ref unusedOverrideTotal);
                     if (count > 0)
                     {
                         fileCounts.Add((prefabPath, count));
@@ -392,6 +393,11 @@ namespace Hidano.MissingReferenceFinder.Editor
             breakdown = breakdownBuilder.Length > 0 ? breakdownBuilder.ToString() : "なし";
 
             var summary = $"{LogPrefix} 検査完了: {scenePaths.Count} シーン / {prefabPaths.Count} Prefab / Missing {total} 件";
+            if (unusedOverrideTotal > 0)
+            {
+                summary += $" / 未使用オーバーライド {unusedOverrideTotal} 件 (警告のみ・ビルドは継続)";
+            }
+
             if (total > 0)
             {
                 summary += $"\n内訳: {breakdown}";
@@ -452,8 +458,11 @@ namespace Hidano.MissingReferenceFinder.Editor
             public bool IsTransform => ClassId == TransformClassId || ClassId == RectTransformClassId;
         }
 
-        /// <summary>シーンまたは Prefab ファイルを 1 つ検査し、Missing の数を返す。</summary>
-        private static int CheckYamlFile(string assetPath, bool isScene, List<string> usedByScenes)
+        /// <summary>
+        /// シーンまたは Prefab ファイルを 1 つ検査し、Missing の数を返す。
+        /// 警告扱いにした未使用オーバーライドの数は <paramref name="unusedOverrideCount"/> に加算する。
+        /// </summary>
+        private static int CheckYamlFile(string assetPath, bool isScene, List<string> usedByScenes, ref int unusedOverrideCount)
         {
             var context = new FileContext(assetPath, isScene, ParseYamlFile(assetPath), usedByScenes);
 
@@ -462,6 +471,14 @@ namespace Hidano.MissingReferenceFinder.Editor
             {
                 foreach (var entry in doc.Missing)
                 {
+                    // 存在しないプロパティへのオーバーライドは Unity が適用しない (Inspector にも出ない) ので、ビルドは止めずに警告のみ
+                    if (context.IsUnusedOverride(doc, entry))
+                    {
+                        unusedOverrideCount++;
+                        Debug.LogWarning(context.BuildUnusedOverrideReport(doc, entry), context.GetContextObject(doc, entry));
+                        continue;
+                    }
+
                     count++;
                     Debug.LogError(context.BuildReport(doc, entry), context.GetContextObject(doc, entry));
                 }
@@ -1024,6 +1041,72 @@ namespace Hidano.MissingReferenceFinder.Editor
                     DescribeGuid(entry.Guid),
                     $"対処: {OpenInstruction} 上記 GameObject を選択し、Inspector の {typeName} にある「{displayName}」に" +
                     $"正しい{fieldTypeName ?? "アセット"}を設定し直すか、フィールドを右クリック → Revert でオーバーライドを解除して Prefab の値に戻してください。");
+            }
+
+            /// <summary>
+            /// PrefabInstance のオーバーライドが、元 Prefab のコンポーネントに存在しないプロパティを指しているか。
+            /// フィールド名の変更 (例: Cinemachine 3 の CinemachineVolumeSettings で FocusTarget → m_FocusTarget) や
+            /// フィールド削除で取り残されたオーバーライドは Unity が適用せず Inspector にも表示されないため、
+            /// Inspector から設定し直しても消えず、参照先が消えたアセットでも実害がない。
+            /// 判定できない場合 (コンポーネントを読めない / 配列要素 / SerializeReference) は false (= Missing 扱い) にする。
+            /// </summary>
+            public bool IsUnusedOverride(DocumentInfo doc, MissingEntry entry)
+            {
+                if (doc.ClassId != PrefabInstanceClassId || entry.Key == SourcePrefabKey || entry.TargetFileId == 0)
+                {
+                    return false;
+                }
+
+                if (!(PrefabAssetCache.GetObject(doc.SourcePrefabGuid, entry.TargetFileId) is Component target))
+                {
+                    return false;
+                }
+
+                var propertyPath = entry.Key;
+                if (propertyPath.StartsWith("managedReferences", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                // 配列要素はインスタンス側でサイズが拡張されている場合があるため、配列プロパティ自体の存在だけを確認する
+                var arrayIndex = propertyPath.IndexOf(".Array.data[", StringComparison.Ordinal);
+                if (arrayIndex >= 0)
+                {
+                    propertyPath = propertyPath.Substring(0, arrayIndex);
+                }
+
+                try
+                {
+                    using var serializedObject = new SerializedObject(target);
+                    return serializedObject.FindProperty(propertyPath) == null;
+                }
+                catch (Exception)
+                {
+                    return false;
+                }
+            }
+
+            public string BuildUnusedOverrideReport(DocumentInfo instance, MissingEntry entry)
+            {
+                var targetComponent = (Component)PrefabAssetCache.GetObject(instance.SourcePrefabGuid, entry.TargetFileId);
+                AssetDatabase.TryGetGUIDAndLocalFileIdentifier(targetComponent.gameObject, out _, out long gameObjectLocalId);
+                var ownerPath = GetPrefabInstanceObjectPath(instance, gameObjectLocalId, 0);
+                var typeName = targetComponent.GetType().Name;
+                var sourcePrefabPath = PrefabAssetCache.GetPath(instance.SourcePrefabGuid) ?? instance.SourcePrefabGuid;
+                var location = _isScene
+                    ? $"シーン {_fileLabel} を開き、Hierarchy で上記 Prefab インスタンスを右クリック"
+                    : $"Prefab {_fileLabel} を開き、Hierarchy で上記 Prefab インスタンスを右クリック";
+
+                return Compose(
+                    $"[Unused Override] {_fileLabel} | {ownerPath} | {typeName} | {entry.Key} (存在しないプロパティへのオーバーライド)",
+                    "ファイル: " + _assetPath,
+                    DescribeUsedBy(),
+                    $"GameObject: {ownerPath} (Prefab {sourcePrefabPath} のインスタンス)",
+                    "コンポーネント: " + typeName,
+                    $"プロパティ: {entry.Key} は {typeName} に存在しません (フィールド名の変更・削除で取り残されたオーバーライド)",
+                    DescribeGuid(entry.Guid),
+                    "影響: このオーバーライドは Unity に適用されず Inspector にも表示されないため、ビルドは止めません。",
+                    $"対処: {location} → Prefab → Remove Unused Overrides でファイルから削除できます。");
             }
 
             private string OpenInstruction => _isScene
