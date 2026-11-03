@@ -9,7 +9,7 @@ namespace Hidano.MissingReferenceFinder.Editor
     /// </summary>
     public sealed class MissingReferenceFinderWindow : EditorWindow
     {
-        private const string MenuPath = "Hidano/Tools/Missing Reference Finder";
+        private const string MenuPath = "Tools/Hidano/Missing Reference Finder";
 
         [SerializeField] private bool _reportNone = true;
         [SerializeField] private bool _monoBehaviourOnly = true;
